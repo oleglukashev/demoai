@@ -1,0 +1,40 @@
+// DemoAI — Prisma schema (Postgres).
+// Postgres stores document/chunk text and metadata; vectors live in Qdrant
+// (collection `QDRANT_COLLECTION`, cosine, 1536 dims for text-embedding-3-small).
+// A Chunk's `id` is the LlamaIndex node id (a UUID) and doubles as the Qdrant
+// point id, so chunk identity is the same across all three systems.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Document {
+  id             String   @id @default(cuid())
+  name           String
+  content        String
+  chunkerVersion String   @default("") // chunker config that produced the current chunks
+  createdAt      DateTime @default(now())
+  chunks         Chunk[]
+}
+
+model Chunk {
+  id         String   @id @default(uuid()) // LlamaIndex node id_ / Qdrant point id
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  index      Int
+  content    String
+  hash       String // LlamaIndex node hash; lets reindex skip unchanged chunks
+  startChar  Int?
+  endChar    Int?
+  tokenCount Int?
+  keywords   String   @default("[]") // JSON array; used by the no-embedding fallback
+  createdAt  DateTime @default(now())
+
+  @@index([documentId])
+  @@index([documentId, hash])
+}
