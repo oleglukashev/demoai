@@ -11,7 +11,7 @@ Backend для DemoAI:
 - **Qdrant** — векторы чанков (cosine, 1536 измерений)
 - **LlamaIndex** (`@llamaindex/core`) — чанкинг через `SentenceSplitter`
 - Эмбеддинги: OpenAI `text-embedding-3-small`
-- Ответы: Claude (`claude-sonnet-5`)
+- Ответы: OpenAI Chat Completions (`gpt-5.4-mini` по умолчанию)
 
 ## Как устроено хранение
 
@@ -63,11 +63,11 @@ npm run build && npm start   # http://localhost:3006
 npm run dev
 ```
 
-Ключи (опционально) — в `.env`:
+Ключ (опционально) — в `.env`. Один и тот же ключ включает и эмбеддинги, и ответы:
 
 ```
 OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_CHAT_MODEL=gpt-5.4-mini   # необязательно; любая модель /v1/chat/completions
 ```
 
 ## Эндпоинты
@@ -88,5 +88,5 @@ src/lib/chunking.ts        LlamaIndex SentenceSplitter (512/64) + ключевы
 src/lib/embeddings.ts      батч-эмбеддинги OpenAI + keyword-фоллбэк
 src/lib/qdrant.service.ts  коллекция, upsert, поиск, удаление векторов
 src/documents/             upload → chunk → embed → Postgres + Qdrant, reindex
-src/chat/                  поиск в Qdrant → тексты из Postgres → ответ Claude
+src/chat/                  поиск в Qdrant → тексты из Postgres → ответ OpenAI
 ```

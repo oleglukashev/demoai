@@ -16,6 +16,8 @@ interface RankedChunk {
 @Injectable()
 export class ChatService {
   private readonly logger = new Logger(ChatService.name);
+  // Read in the instance, not at module load, so `dotenv` has already run.
+  private readonly chatModel = process.env.OPENAI_CHAT_MODEL ?? 'gpt-5.4-mini';
 
   constructor(
     private prisma: PrismaService,
@@ -82,46 +84,55 @@ export class ChatService {
       .slice(0, TOP_K);
   }
 
-  /** Build a context prompt from retrieved chunks and let Claude answer. */
+  /** Build a context prompt from retrieved chunks and let the model answer. */
   private async answer(message: string, chunks: RankedChunk[]): Promise<string> {
     const context = chunks
       .map((c, i) => `[${i + 1}] (${c.documentName})\n${c.content}`)
       .join('\n\n');
 
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const apiKey = process.env.OPENAI_API_KEY;
     if (apiKey) {
       try {
         const system =
           'Ты — AI-ассистент DemoAI. Отвечай на языке пользователя, опираясь только на приведённый контекст из документов. Если ответа в контексте нет — честно скажи об этом.' +
           (context ? `\n\nКонтекст из документов:\n${context}` : '');
-        const res = await fetch('https://api.anthropic.com/v1/messages', {
+        const res = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
+            authorization: `Bearer ${apiKey}`,
           },
           body: JSON.stringify({
-            model: 'claude-sonnet-5',
-            max_tokens: 1024,
-            system,
-            messages: [{ role: 'user', content: message }],
+            model: this.chatModel,
+            // On gpt-5-class models this budget also covers hidden reasoning tokens:
+            // set it too low and the answer comes back empty. `max_tokens` is rejected
+            // outright by those models, so keep this parameter for every family.
+            max_completion_tokens: 1024,
+            messages: [
+              { role: 'system', content: system },
+              { role: 'user', content: message },
+            ],
           }),
         });
         const data = await res.json();
-        return data?.content?.[0]?.text ?? 'Не удалось получить ответ от модели.';
-      } catch {
-        return 'Ошибка при обращении к модели. Проверьте ANTHROPIC_API_KEY.';
+        if (!res.ok) throw new Error(data?.error?.message ?? `HTTP ${res.status}`);
+        return (
+          data?.choices?.[0]?.message?.content?.trim() ||
+          'Не удалось получить ответ от модели.'
+        );
+      } catch (err) {
+        this.logger.error(`OpenAI chat failed: ${String(err)}`);
+        return 'Ошибка при обращении к модели. Проверьте OPENAI_API_KEY.';
       }
     }
 
-    // Demo fallback (no Anthropic key): show what retrieval found.
+    // Demo fallback (no key): show what retrieval found.
     if (chunks.length === 0) {
-      return `Вы спросили: «${message}»\n\nВ загруженных документах не нашлось релевантных фрагментов. Демо-режим (ANTHROPIC_API_KEY не задан).`;
+      return `Вы спросили: «${message}»\n\nВ загруженных документах не нашлось релевантных фрагментов. Демо-режим (OPENAI_API_KEY не задан).`;
     }
     return (
       `Вы спросили: «${message}»\n\n` +
-      `Демо-режим (ANTHROPIC_API_KEY не задан). Наиболее релевантные фрагменты из документов:\n\n` +
+      `Демо-режим (OPENAI_API_KEY не задан). Наиболее релевантные фрагменты из документов:\n\n` +
       chunks
         .map((c, i) => `[${i + 1}] ${c.documentName} (score ${c.score.toFixed(2)}):\n${c.content.slice(0, 300)}${c.content.length > 300 ? '…' : ''}`)
         .join('\n\n')
