@@ -1,49 +1,63 @@
 # DemoAI API (NestJS + Prisma)
 
-Backend для DemoAI. Повторяет пайплайн HorecaGPT минимальным кодом:
-**загрузка документа → разбивка на чанки → (эмбеддинги) → сохранение в БД →
+Backend для DemoAI:
+**загрузка документа → разбивка на чанки (LlamaIndex) → эмбеддинги → векторы в Qdrant →
 ответ чат-ботом по релевантным чанкам (RAG)**.
 
 ## Стек
 
 - **NestJS** — API
-- **Prisma + PostgreSQL + pgvector** — БД (как в проде HorecaGPT)
-- Эмбеддинги: OpenAI `text-embedding-3-small` → колонка `vector(1536)`
+- **Prisma + PostgreSQL** — документы, чанки и их метаданные
+- **Qdrant** — векторы чанков (cosine, 1536 измерений)
+- **LlamaIndex** (`@llamaindex/core`) — чанкинг через `SentenceSplitter`
+- Эмбеддинги: OpenAI `text-embedding-3-small`
 - Ответы: Claude (`claude-sonnet-5`)
 
-## Как это повторяет HorecaGPT
+## Как устроено хранение
 
-| HorecaGPT | DemoAI |
+Данные разделены между двумя базами, связкой служит id чанка:
+
+| Где | Что лежит |
 |---|---|
-| `document_chunks` (Postgres) | таблица `Chunk` (Prisma) |
-| `createOptimalChunks` — абзацы, ~250 слов, 20% overlap | `src/lib/chunking.ts` |
-| `text-embedding-3-small` → pgvector `vector` | то же: колонка `Chunk.embedding vector(1536)` |
-| retrieval: `embedding_vec <=> query` (cosine) | `ChatService.retrieve` — тот же `<=>` через raw SQL |
-| Claude отвечает по контексту | `ChatService.answer` |
+| Postgres, `Document` | имя, полный текст, `chunkerVersion` |
+| Postgres, `Chunk` | текст чанка, `index`, `hash`, `startChar`/`endChar`, `tokenCount`, `keywords` |
+| Qdrant, коллекция `demoai_chunks` | вектор + payload `{ documentId }` |
 
-`embedding` — это pgvector-колонка (`Unsupported("vector(1536)")` в Prisma),
-запись и поиск идут через raw SQL с оператором `<=>`, точно как в HorecaGPT.
+`Chunk.id` — это id узла LlamaIndex (UUID), он же id точки в Qdrant. Одна
+идентичность на три системы: искать в Qdrant, читать текст из Postgres.
+Postgres остаётся источником правды — в Qdrant текст не дублируется.
 
-Без ключей API работает в демо-режиме: retrieval по совпадению слов + ответ
-показывает найденные фрагменты. С ключами — полноценный RAG на pgvector.
+## Чанкинг
 
-## Требования к БД
+`src/lib/chunking.ts` — `SentenceSplitter` с `chunkSize: 512`, `chunkOverlap: 64`.
+Размер считается **в токенах** тем же токенайзером (cl100k_base), которым меряет
+`text-embedding-3-small`, поэтому чанки укладываются в лимит точно, а не по оценке
+из числа символов.
 
-Нужен PostgreSQL с расширением **pgvector** и отдельная база `demoai`:
+У каждого узла есть стабильный `hash` от текста: при `POST /documents/:id/reindex`
+чанки с неизменившимся текстом сохраняют свою строку и свой вектор, и заново
+эмбеддится только реально новый текст.
+
+Без ключей API работает в демо-режиме: retrieval по совпадению слов (по Postgres,
+без Qdrant) + ответ показывает найденные фрагменты. С ключами — полноценный RAG.
+
+## Требования
+
+PostgreSQL (расширения не нужны) и Qdrant:
 
 ```bash
 createdb demoai
-psql -d demoai -c "CREATE EXTENSION IF NOT EXISTS vector;"
+docker compose up -d qdrant   # http://localhost:6333/dashboard
 ```
 
-Строка подключения — в `.env` (`DATABASE_URL`).
+Настройки — в `.env` (`DATABASE_URL`, `QDRANT_URL`, `QDRANT_COLLECTION`).
 
 ## Запуск
 
 ```bash
 cd demoai/api
 npm install
-npx prisma db push      # создаёт таблицы + колонку vector(1536)
+npx prisma db push
 npm run build && npm start   # http://localhost:3006
 # либо в режиме разработки:
 npm run dev
@@ -60,17 +74,19 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 | Метод | Путь | Назначение |
 |---|---|---|
-| `POST` | `/documents` | Загрузка: multipart `file` **или** JSON `{ name, content }`. Разбивает на чанки и сохраняет. |
+| `POST` | `/documents` | Загрузка: multipart `file` **или** JSON `{ name, content }`. Чанкует, эмбеддит, сохраняет. |
 | `GET` | `/documents` | Список документов с числом чанков. |
-| `DELETE` | `/documents/:id` | Удалить документ (и его чанки). |
+| `POST` | `/documents/:id/reindex` | Перечанковать документ; заново эмбеддит только изменившийся текст. Ответ: `{ chunks, reused, embedded, deleted }`. |
+| `DELETE` | `/documents/:id` | Удалить документ, его чанки и векторы. |
 | `POST` | `/chat` | `{ message }` → `{ reply, sources }`. Находит релевантные чанки и отвечает. |
 
 ## Структура
 
 ```
-prisma/schema.prisma       Document + Chunk (embedding vector(1536))
-src/lib/chunking.ts        разбивка на чанки + ключевые слова
-src/lib/embeddings.ts      эмбеддинги + keyword-фоллбэк
-src/documents/             upload → chunk → embed → save (raw SQL для vector)
-src/chat/                  pgvector-retrieval (<=>) + ответ Claude
+prisma/schema.prisma       Document + Chunk (текст и метаданные; векторов здесь нет)
+src/lib/chunking.ts        LlamaIndex SentenceSplitter (512/64) + ключевые слова
+src/lib/embeddings.ts      батч-эмбеддинги OpenAI + keyword-фоллбэк
+src/lib/qdrant.service.ts  коллекция, upsert, поиск, удаление векторов
+src/documents/             upload → chunk → embed → Postgres + Qdrant, reindex
+src/chat/                  поиск в Qdrant → тексты из Postgres → ответ Claude
 ```

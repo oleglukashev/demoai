@@ -99,9 +99,9 @@ export class DocumentsService {
       }),
     ]);
 
-    if (embeddingsEnabled()) {
-      await this.qdrant.deleteByIds(staleIds);
-      if (embeddings) {
+    if (embeddings) {
+      try {
+        await this.qdrant.deleteByIds(staleIds);
         await this.qdrant.upsertChunks(
           fresh.map((f, i) => ({
             id: f.node.id,
@@ -109,6 +109,14 @@ export class DocumentsService {
             documentId: doc.id,
           })),
         );
+      } catch (err) {
+        // Drop the rows we just added: reuse matches on hash, so a chunk row that
+        // outlived its failed upsert would be treated as already-embedded forever.
+        // Removing them lets a repeat reindex rebuild the missing vectors.
+        await this.prisma.chunk.deleteMany({
+          where: { id: { in: fresh.map((f) => f.node.id) } },
+        });
+        throw err;
       }
     }
 

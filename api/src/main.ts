@@ -1,3 +1,5 @@
+// Must come first: config is read while the modules below are being constructed.
+import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 
